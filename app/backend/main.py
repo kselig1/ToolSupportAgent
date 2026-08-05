@@ -1,0 +1,109 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+from collections.abc import AsyncIterator
+
+from dotenv import load_dotenv
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+
+load_dotenv()
+
+if not os.getenv("LANGSMITH_API_KEY"):
+    os.environ["LANGSMITH_TRACING"] = "false"
+
+from app.backend.graph import GRAPH_SPEC, triage_graph  # noqa: E402
+from app.backend.plotter import plotter  # noqa: E402
+
+
+class TriageRequest(BaseModel):
+    question: str = Field(min_length=2, max_length=2000)
+
+
+app = FastAPI(title="ToolAgent API", version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:8501", "http://127.0.0.1:8501"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def sse(payload: dict) -> str:
+    return f"data: {json.dumps(payload, default=str)}\n\n"
+
+
+@app.get("/health")
+def health() -> dict:
+    return {
+        "status": "ok",
+        "llm": "openai" if os.getenv("OPENAI_API_KEY") else "deterministic fallback",
+        "tracing": os.getenv("LANGSMITH_TRACING", "false").lower() == "true" and bool(os.getenv("LANGSMITH_API_KEY")),
+    }
+
+
+@app.get("/graph")
+def graph() -> dict:
+    return GRAPH_SPEC
+
+
+@app.get("/plotter")
+def plotter_data() -> dict:
+    return plotter.load()
+
+
+@app.post("/plotter/fix")
+def fix_plotter() -> dict:
+    plotter.apply_fix()
+    return plotter.load()
+
+
+@app.post("/plotter/reset")
+def reset_plotter() -> dict:
+    plotter.reset()
+    return plotter.load()
+
+
+@app.post("/triage/stream")
+async def triage_stream(request: TriageRequest) -> StreamingResponse:
+    async def events() -> AsyncIterator[str]:
+        yield sse({"event": "run", "phase": "started"})
+        answer = ""
+        streamed_answer = False
+        try:
+            async for part in triage_graph.astream(
+                {"question": request.question},
+                stream_mode=["custom", "messages", "updates"],
+                version="v2",
+            ):
+                if part["type"] == "custom":
+                    yield sse(part["data"])
+                    await asyncio.sleep(0.22)  # demo pacing makes graph execution legible
+                elif part["type"] == "messages":
+                    message, metadata = part["data"]
+                    content = message.content if isinstance(message.content, str) else ""
+                    if content and metadata.get("langgraph_node") == "return_solution":
+                        answer += content
+                        streamed_answer = True
+                        yield sse({"event": "token", "text": content})
+                elif part["type"] == "updates":
+                    for node, update in part["data"].items():
+                        if isinstance(update, dict) and update.get("answer"):
+                            answer = update["answer"]
+                        yield sse({"event": "node", "node": node, "phase": "complete", "detail": "Step complete"})
+            # Offline/fallback answers do not produce message stream events.
+            if answer and not streamed_answer:
+                for word in answer.split(" "):
+                    yield sse({"event": "token", "text": word + " "})
+                    await asyncio.sleep(0.025)
+            yield sse({"event": "run", "phase": "complete"})
+        except Exception as exc:
+            yield sse({"event": "error", "message": str(exc)})
+
+    return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+

@@ -1,0 +1,28 @@
+[project]
+name = "tracefix"
+version = "0.1.0"
+description = "A LangGraph and LangSmith engineering support triage demo"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.116.0",
+  "httpx>=0.28.1",
+  "langchain-openai>=0.3.30",
+  "langgraph>=1.1.0",
+  "langsmith>=0.4.20",
+  "pandas>=2.2.3",
+  "python-dotenv>=1.1.1",
+  "streamlit>=1.48.0",
+  "uvicorn[standard]>=0.35.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.4.1",
+  "pytest-asyncio>=1.1.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
